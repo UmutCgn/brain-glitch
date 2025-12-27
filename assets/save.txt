@@ -1,0 +1,2321 @@
+// ignore_for_file: curly_braces_in_flow_control_structures
+
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:math';
+import 'package:flutter/services.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MobileAds.instance.initialize();
+  runApp(const CandyBrainApp());
+}
+
+class CandyBrainApp extends StatelessWidget {
+  const CandyBrainApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Brain Glitch',
+      theme: ThemeData(
+        fontFamily: 'Arial Rounded',
+        scaffoldBackgroundColor: const Color(0xFFFFC0CB),
+        sliderTheme: const SliderThemeData(
+          showValueIndicator: ShowValueIndicator.onDrag,
+        ),
+      ),
+      home: const GameScreen(),
+    );
+  }
+}
+
+enum TaskType { direction, color, wait, math, emoji, notColor }
+
+enum Direction { up, down, left, right }
+
+class GameScreen extends StatefulWidget {
+  const GameScreen({super.key});
+
+  @override
+  State<GameScreen> createState() => _GameScreenState();
+}
+
+class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
+  // --- OYUN DEĞİŞKENLERİ ---
+  bool isPlaying = false;
+  int score = 0;
+  int level = 1;
+  double progress = 1.0;
+  Timer? _gameTimer;
+  Timer? _waitTaskTimer;
+  int speedMilliseconds = 3000;
+
+  // --- REKLAM DEĞİŞKENLERİ ---
+  BannerAd? _bannerAd;
+  bool _isBannerReady = false;
+  RewardedAd? _rewardedAd;
+  InterstitialAd? _interstitialAd;
+  int deathCount = 0;
+
+  // Test ID'leri
+  final String _bannerUnitId = 'ca-app-pub-3940256099942544/6300978111';
+  final String _rewardedUnitId = 'ca-app-pub-3940256099942544/5224354917';
+  final String _interstitialUnitId = 'ca-app-pub-3940256099942544/1033173712';
+
+  // --- VERİ KAYDETME & YÜKLEME ---
+  Future<void> saveGameData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('totalCandy', totalCandy);
+    await prefs.setInt('heartCount', inventory["heart"] ?? 0);
+    await prefs.setInt('timeCount', inventory["time_potion"] ?? 0);
+    await prefs.setInt('sugarCount', inventory["sugar_potion"] ?? 0);
+    
+    // YENİ: Ses ve Müzik Ayarlarını Kaydet
+    await prefs.setDouble('soundVolume', soundVolume);
+    await prefs.setDouble('musicVolume', musicVolume);
+    await prefs.setString('language', language); // Dili de kaydedelim
+  }
+
+  Future<void> loadGameData() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      totalCandy = prefs.getInt('totalCandy') ?? 1000;
+      inventory["heart"] = prefs.getInt('heartCount') ?? 0;
+      inventory["time_potion"] = prefs.getInt('timeCount') ?? 0;
+      inventory["sugar_potion"] = prefs.getInt('sugarCount') ?? 0;
+      
+      // YENİ: Ses, Müzik ve Dil Ayarlarını Geri Yükle
+      soundVolume = prefs.getDouble('soundVolume') ?? 1.0;
+      musicVolume = prefs.getDouble('musicVolume') ?? 0.5;
+      language = prefs.getString('language') ?? "TR";
+      
+      manageBackgroundMusic(); // Müzik ayarı yüklendikten sonra müziği ayarla
+    });
+  }
+
+  DateTime _taskStartTime = DateTime.now();
+  final AudioPlayer _sfxPlayer = AudioPlayer();
+  final AudioPlayer _musicPlayer = AudioPlayer();
+  String? currentMusicTrack;
+
+  double soundVolume = 1.0;
+  double musicVolume = 0.5;
+
+  int speedComboCount = 0;
+  bool isFeverMode = false;
+  int nextMotivationTarget = 0;
+  String currentMotivationText = "";
+  bool showMotivation = false;
+
+  bool activeSecondChance = false;
+  bool activeTimeSlow = false;
+  bool activeDoubleCandy = false;
+
+  int totalCandy = 1000;
+  int earnedCandyThisRound = 0;
+  int losePenalty = 15;
+
+  Map<String, int> inventory = {
+    "heart": 0,
+    "time_potion": 0,
+    "sugar_potion": 0,
+  };
+
+  TaskType currentTask = TaskType.direction;
+  Direction currentDirection = Direction.up;
+  bool isReverseRound = true;
+
+  String colorText = "MAVİ";
+  Color colorInk = Colors.red;
+  Color correctColor = Colors.blue;
+  String colorInstruction = "";
+  List<Color> colorOptions = [];
+
+  String mathEquation = "";
+  bool isMathCorrect = false;
+
+  String emojiText = "";
+  String correctEmoji = "";
+  List<String> emojiOptions = [];
+
+  bool isGiftVisible = false;
+  double giftTopPosition = 0;
+  double giftLeftPosition = 0;
+  Timer? _giftSpawnTimer;
+  String giftBonusText = "";
+  bool isBonusTextVisible = false;
+
+  String language = "TR";
+
+  final Color primaryPink = const Color(0xFFFF69B4);
+  final Color accentCyan = const Color(0xFF00E5FF);
+  final Color bgNormal1 = const Color(0xFFFF9A9E);
+  final Color bgNormal2 = const Color(0xFFFECFEF);
+  final Color bgFever1 = const Color(0xFF2C3E50);
+  final Color bgFever2 = const Color(0xFFFD746C);
+
+  late AnimationController _bgController;
+
+  // --- GÜNCELLENMİŞ DİL SÖZLÜĞÜ ---
+  final Map<String, Map<String, String>> localizedText = {
+    "TR": {
+      "start": "BAŞLA",
+      "settings": "AYARLAR",
+      "shop": "MARKET",
+      "sound": "Ses Şiddeti",
+      "music": "Müzik Sesi",
+      "lang": "Dil (Language)",
+      "close": "KAPAT",
+      "buy": "AL",
+      "score": "SKOR",
+      "reverse": "TERSİNE KAYDIR!",
+      "same": "KAYDIR!",
+      "swipe": "KAYDIR",
+      "dont_touch": "DOKUNMA!",
+      "wait": "BEKLE...",
+      "math_q": "İŞLEM DOĞRU MU?",
+      "emoji_q": "YAZI HANGİSİ?",
+      "not_color_q": "OLMAYANA BAS!",
+      "wrong": "YANLIŞ",
+      "correct": "DOĞRU",
+      "color_ink": "YAZININ RENGİ?",
+      "color_text": "YAZAN RENK?",
+      "game_over_time": "SÜRE DOLDU!",
+      "game_over_touch": "DOKUNMAMAN LAZIMDI!",
+      "game_over_hand": "ELİNİ ÇEK!",
+      "game_over_wrong": "YANLIŞ HAMLE!",
+      "brain_age": "Beyin Yaşın",
+      "fever": "ALEV ALDIN!",
+      "shield_broken": "İKİNCİ ŞANS KULLANILDI!",
+      "item_heart": "İkinci Şans",
+      "desc_heart": "1 Hata affedilir",
+      "item_time": "Zaman İksiri",
+      "desc_time": "Süre yavaş akar",
+      "item_sugar": "Şeker Yağmuru",
+      "desc_sugar": "2x Şeker kazancı",
+      "mot_1": "HARİKASIN!",
+      "mot_2": "BU NE HIZ!",
+      "mot_3": "ZEKA KÜPÜ!",
+      "mot_4": "EFSANESİN!",
+      "mot_5": "DURDURULAMAZ!",
+      "revive": "DEVAM ET",
+      "watch_ad": "Reklam İzle",
+      // --- EKLENENLER ---
+      "bag": "Çanta",
+      "retry": "TEKRAR",
+      "collected": "Toplanan",
+      "penalty": "Ceza",
+      "item_warning": "Çantanda Eşya Var! Oyunda Aktif Olacak.",
+      "revive_active_msg": "İKİNCİ ŞANS AKTİF!",
+    },
+    "EN": {
+      "start": "START",
+      "settings": "SETTINGS",
+      "shop": "SHOP",
+      "sound": "SFX Volume",
+      "music": "Music Volume",
+      "lang": "Language (Dil)",
+      "close": "CLOSE",
+      "buy": "BUY",
+      "score": "SCORE",
+      "reverse": "SWIPE REVERSE!",
+      "same": "SWIPE SAME!",
+      "swipe": "SWIPE",
+      "dont_touch": "DON'T TOUCH!",
+      "wait": "WAIT...",
+      "math_q": "IS IT CORRECT?",
+      "emoji_q": "WHICH EMOTION?",
+      "not_color_q": "TAP NOT COLOR!",
+      "wrong": "FALSE",
+      "correct": "TRUE",
+      "color_ink": "INK COLOR?",
+      "color_text": "TEXT MEANING?",
+      "game_over_time": "TIME UP!",
+      "game_over_touch": "SHOULDN'T TOUCH!",
+      "game_over_hand": "HANDS OFF!",
+      "game_over_wrong": "WRONG MOVE!",
+      "brain_age": "Brain Age",
+      "fever": "FEVER MODE!",
+      "shield_broken": "SECOND CHANCE USED!",
+      "item_heart": "Second Chance",
+      "desc_heart": "Survive 1 mistake",
+      "item_time": "Time Potion",
+      "desc_time": "Time flows slower",
+      "item_sugar": "Sugar Rain",
+      "desc_sugar": "2x Candy gain",
+      "mot_1": "AWESOME!",
+      "mot_2": "SO FAST!",
+      "mot_3": "GENIUS!",
+      "mot_4": "LEGENDARY!",
+      "mot_5": "UNSTOPPABLE!",
+      "revive": "REVIVE",
+      "watch_ad": "Watch Ad",
+      // --- EKLENENLER ---
+      "bag": "Bag",
+      "retry": "RETRY",
+      "collected": "Collected",
+      "penalty": "Penalty",
+      "item_warning": "You have items! They will be active.",
+      "revive_active_msg": "SECOND CHANCE ACTIVE!",
+    },
+  };
+
+  String t(String key) => localizedText[language]![key] ?? key;
+
+  @override
+  void initState() {
+    super.initState();
+    _bgController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 10),
+    )..repeat();
+    _musicPlayer.setReleaseMode(ReleaseMode.loop);
+
+    loadGameData(); // Verileri yükle (Ayarlar dahil)
+    
+    _loadBannerAd();
+    _loadRewardedAd();
+    _loadInterstitialAd();
+  }
+
+  @override
+  void dispose() {
+    _gameTimer?.cancel();
+    _waitTaskTimer?.cancel();
+    _giftSpawnTimer?.cancel();
+    _bgController.dispose();
+    _sfxPlayer.dispose();
+    _musicPlayer.dispose();
+    _bannerAd?.dispose();
+    _rewardedAd?.dispose();
+    _interstitialAd?.dispose();
+    super.dispose();
+  }
+
+  void _loadBannerAd() {
+    _bannerAd = BannerAd(
+      adUnitId: _bannerUnitId,
+      request: const AdRequest(),
+      size: AdSize.banner,
+      listener: BannerAdListener(
+        onAdLoaded: (_) {
+          setState(() {
+            _isBannerReady = true;
+          });
+        },
+        onAdFailedToLoad: (ad, err) {
+          debugPrint('Banner yüklenemedi: $err');
+          _isBannerReady = false;
+          ad.dispose();
+        },
+      ),
+    )..load();
+  }
+
+  void _loadRewardedAd() {
+    RewardedAd.load(
+      adUnitId: _rewardedUnitId,
+      request: const AdRequest(),
+      rewardedAdLoadCallback: RewardedAdLoadCallback(
+        onAdLoaded: (ad) {
+          _rewardedAd = ad;
+        },
+        onAdFailedToLoad: (err) {
+          debugPrint('Ödüllü reklam yüklenemedi: $err');
+          _rewardedAd = null;
+        },
+      ),
+    );
+  }
+
+  void _loadInterstitialAd() {
+    InterstitialAd.load(
+      adUnitId: _interstitialUnitId,
+      request: const AdRequest(),
+      adLoadCallback: InterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          _interstitialAd = ad;
+          _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
+            onAdDismissedFullScreenContent: (ad) {
+              ad.dispose();
+              _loadInterstitialAd();
+            },
+            onAdFailedToShowFullScreenContent: (ad, err) {
+              ad.dispose();
+              _loadInterstitialAd();
+            },
+          );
+        },
+        onAdFailedToLoad: (err) {
+          debugPrint('Geçiş reklamı yüklenemedi: $err');
+          _interstitialAd = null;
+        },
+      ),
+    );
+  }
+
+  void showRewardedAdForRevive() {
+    if (_rewardedAd == null) {
+      showToast("Reklam yükleniyor, lütfen bekle...", Colors.grey);
+      _loadRewardedAd();
+      return;
+    }
+
+    _rewardedAd!.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (ad) {
+        ad.dispose();
+        _loadRewardedAd(); 
+      },
+      onAdFailedToShowFullScreenContent: (ad, err) {
+        ad.dispose();
+        _loadRewardedAd();
+      },
+    );
+
+    _rewardedAd!.show(
+      onUserEarnedReward: (ad, reward) {
+        Navigator.pop(context);
+        startGame(isRevive: true);
+        showToast(t("revive_active_msg"), Colors.green);
+      },
+    );
+  }
+
+  void showInterstitialAd() {
+    if (_interstitialAd != null) {
+      _interstitialAd!.show();
+      _interstitialAd = null;
+    }
+  }
+
+  void playSound(String fileName) async {
+    if (soundVolume <= 0) return;
+    try {
+      final player = AudioPlayer();
+      await player.setVolume(soundVolume);
+      await player.play(
+        AssetSource('audio/$fileName'),
+        mode: PlayerMode.lowLatency,
+      );
+    } catch (e) {
+      debugPrint("SFX Hatası: $e");
+    }
+  }
+
+  void manageBackgroundMusic() async {
+    if (musicVolume <= 0 || !isPlaying) {
+      await _musicPlayer.stop();
+      currentMusicTrack = null;
+      return;
+    }
+
+    String targetTrack = isFeverMode
+        ? "bg_music_fever.mp3"
+        : "bg_music_normal.mp3";
+
+    await _musicPlayer.setVolume(musicVolume);
+
+    if (currentMusicTrack == targetTrack) return;
+
+    try {
+      await _musicPlayer.stop();
+      await _musicPlayer.setSource(AssetSource('audio/$targetTrack'));
+      await _musicPlayer.setVolume(musicVolume);
+      await _musicPlayer.resume();
+      currentMusicTrack = targetTrack;
+    } catch (e) {
+      debugPrint("Müzik Hatası: $e");
+    }
+  }
+
+  void startGame({bool isRevive = false}) {
+    playSound("ui_click.mp3");
+
+    setState(() {
+      isPlaying = true;
+      
+      if (!isRevive) {
+        // Normal başlangıç - Her şeyi sıfırla
+        score = 0;
+        level = 1;
+        speedComboCount = 0;
+        earnedCandyThisRound = 0;
+        speedMilliseconds = 3000;
+        
+        // --- İŞTE EKSİK OLAN KISIM BURASIYDI ---
+        // Önceki elden kalan tüm özellikleri kapatmalısın!
+        activeSecondChance = false;
+        activeTimeSlow = false;     // <-- Bunu ekledim
+        activeDoubleCandy = false;  // <-- Bunu ekledim (Yoksa 2x hep açık kalır)
+        isFeverMode = false;
+        // ---------------------------------------
+
+        // BUFFLAR (Envanterden kullan)
+        bool anyBuffActive = false;
+        
+        if ((inventory["heart"] ?? 0) > 0) {
+          activeSecondChance = true;
+          inventory["heart"] = inventory["heart"]! - 1;
+          anyBuffActive = true;
+        }
+        if ((inventory["time_potion"] ?? 0) > 0) {
+          activeTimeSlow = true;
+          inventory["time_potion"] = inventory["time_potion"]! - 1;
+          anyBuffActive = true;
+        }
+        if ((inventory["sugar_potion"] ?? 0) > 0) {
+          activeDoubleCandy = true;
+          inventory["sugar_potion"] = inventory["sugar_potion"]! - 1;
+          anyBuffActive = true;
+        }
+
+        // Eğer eşya kullandıysak hemen kaydedelim ki geri gelmesin
+        if (anyBuffActive) {
+          playSound("equip_potion.mp3");
+          saveGameData(); 
+        }
+
+      } else {
+        // Revive (Reklam izleyip devam etme)
+        activeSecondChance = true;
+        playSound("equip_potion.mp3");
+      }
+
+      setNextMotivationTarget();
+      resetGift();
+      startGiftSpawner();
+      nextTask();
+
+      manageBackgroundMusic();
+    });
+    startTimer();
+  }
+
+  void setNextMotivationTarget() {
+    nextMotivationTarget = score + Random().nextInt(8) + 3;
+  }
+
+  void triggerMotivation() {
+    playSound("motivation_hit.mp3");
+
+    List<String> mots = ["mot_1", "mot_2", "mot_3", "mot_4", "mot_5"];
+    setState(() {
+      currentMotivationText = t(mots[Random().nextInt(mots.length)]);
+      showMotivation = true;
+    });
+
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => showMotivation = false);
+    });
+
+    setNextMotivationTarget();
+  }
+
+  void startTimer() {
+    _gameTimer?.cancel();
+    _gameTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      setState(() {
+        double baseDecay = 16.0 / speedMilliseconds;
+        if (activeTimeSlow) baseDecay *= 0.8;
+        if (isFeverMode) baseDecay *= 0.8;
+
+        progress -= baseDecay;
+
+        if (progress <= 0) gameOver(t("game_over_time"));
+      });
+    });
+  }
+
+  void startGiftSpawner() {
+    int randomTime = Random().nextInt(8) + 5;
+    _giftSpawnTimer = Timer(Duration(seconds: randomTime), () {
+      if (isPlaying) spawnGift();
+    });
+  }
+
+  void spawnGift() {
+    if (!mounted || !isPlaying) return;
+    playSound("gift_appear.mp3");
+
+    setState(() {
+      isGiftVisible = true;
+      giftBonusText = "";
+      isBonusTextVisible = false;
+      giftTopPosition =
+          Random().nextDouble() * (MediaQuery.of(context).size.height * 0.4) +
+          100;
+      bool isLeft = Random().nextBool();
+      giftLeftPosition = isLeft
+          ? 20.0
+          : MediaQuery.of(context).size.width - 100.0;
+    });
+
+    Future.delayed(const Duration(seconds: 4), () {
+      if (mounted && isGiftVisible) {
+        setState(() {
+          isGiftVisible = false;
+        });
+        startGiftSpawner();
+      }
+    });
+  }
+
+  void collectGift() {
+    if (!isGiftVisible) return;
+    playSound("gift_collect.mp3");
+
+    int baseBonus = Random().nextInt(50) + 20;
+    if (activeDoubleCandy) baseBonus *= 2;
+
+    setState(() {
+      isGiftVisible = false;
+      earnedCandyThisRound += baseBonus;
+      if (soundVolume > 0) HapticFeedback.heavyImpact();
+      giftBonusText = "+$baseBonus 🍬";
+      isBonusTextVisible = true;
+    });
+
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) {
+        setState(() {
+          isBonusTextVisible = false;
+        });
+        startGiftSpawner();
+      }
+    });
+  }
+
+  void resetGift() {
+    _giftSpawnTimer?.cancel();
+    setState(() {
+      isGiftVisible = false;
+      isBonusTextVisible = false;
+      showMotivation = false;
+    });
+  }
+
+  void nextTask() {
+    _waitTaskTimer?.cancel();
+    _taskStartTime = DateTime.now();
+
+    setState(() {
+      progress = 1.0;
+      level = (score / 10).floor() + 1;
+
+      bool wasFever = isFeverMode;
+
+      if (speedComboCount >= 4) {
+        isFeverMode = true;
+      } else {
+        isFeverMode = false;
+      }
+
+      if (wasFever != isFeverMode) {
+        if (isFeverMode) playSound("fever_start.mp3");
+        manageBackgroundMusic();
+      }
+
+      double rng = Random().nextDouble();
+      bool spawnWait = (level >= 2 && rng > 0.90);
+
+      if (spawnWait) {
+        currentTask = TaskType.wait;
+        startWaitTaskLogic();
+      } else {
+        double subRng = Random().nextDouble();
+        if (subRng < 0.25) {
+          currentTask = TaskType.direction;
+          currentDirection = Direction.values[Random().nextInt(4)];
+          isReverseRound = Random().nextDouble() > 0.3;
+        } else if (subRng < 0.45) {
+          currentTask = TaskType.color;
+          generateColorTask(false);
+        } else if (subRng < 0.60) {
+          currentTask = TaskType.notColor;
+          generateColorTask(true);
+        } else if (subRng < 0.80) {
+          currentTask = TaskType.math;
+          generateMathTask();
+        } else {
+          currentTask = TaskType.emoji;
+          generateEmojiTask(); // YENİ: Dili kontrol ederek oluşturacak
+        }
+      }
+
+      if (score > 0 && score % 5 == 0) {
+        speedMilliseconds = (speedMilliseconds * 0.95).toInt();
+      }
+    });
+  }
+
+  void startWaitTaskLogic() {
+    int waitDuration = (speedMilliseconds * 0.5).toInt();
+    _waitTaskTimer = Timer(Duration(milliseconds: waitDuration), () {
+      if (isPlaying && currentTask == TaskType.wait) {
+        handleResult(true);
+      }
+    });
+  }
+
+  void generateColorTask(bool isNot) {
+    List<String> names = language == "TR"
+        ? ["MAVİ", "KIRMIZI", "YEŞİL", "SARI", "MOR"]
+        : ["BLUE", "RED", "GREEN", "YELLOW", "PURPLE"];
+    List<Color> colors = [
+      Colors.blue,
+      Colors.red,
+      Colors.green,
+      Colors.orange,
+      Colors.purple,
+    ];
+
+    int tIdx = Random().nextInt(5);
+    int cIdx = Random().nextInt(5);
+
+    colorText = names[tIdx];
+    colorInk = colors[cIdx];
+
+    if (isNot) {
+      colorInstruction = "${names[tIdx]} ${t("not_color_q")}";
+      correctColor = Colors.black;
+    } else {
+      bool askForInk = Random().nextBool();
+      colorInstruction = askForInk ? t("color_ink") : t("color_text");
+      correctColor = askForInk ? colors[cIdx] : colors[tIdx];
+    }
+
+    int optionCount = level >= 2 ? 3 : 2;
+    if (level >= 3) optionCount = 4;
+
+    colorOptions = [];
+    if (isNot) {
+      Color forbiddenColor = colors[tIdx];
+      colorOptions.add(forbiddenColor);
+      while (colorOptions.length < optionCount) {
+        Color w = colors[Random().nextInt(5)];
+        if (!colorOptions.contains(w)) colorOptions.add(w);
+      }
+    } else {
+      colorOptions.add(correctColor);
+      while (colorOptions.length < optionCount) {
+        Color w = colors[Random().nextInt(5)];
+        if (!colorOptions.contains(w)) colorOptions.add(w);
+      }
+    }
+    colorOptions.shuffle();
+  }
+
+  void generateMathTask() {
+    int n1 = Random().nextInt(9) + 1;
+    int n2 = Random().nextInt(9) + 1;
+    int realSum = n1 + n2;
+    isMathCorrect = Random().nextBool();
+    int shownSum = isMathCorrect
+        ? realSum
+        : realSum + (Random().nextBool() ? 1 : -1);
+    if (shownSum == realSum && !isMathCorrect) shownSum += 1;
+    mathEquation = "$n1 + $n2 = $shownSum";
+  }
+
+  // --- GÜNCELLENMİŞ EMOJİ GÖREVİ (DİLE DUYARLI) ---
+  void generateEmojiTask() {
+    List<Map<String, String>> data;
+    
+    // Dil kontrolü:
+    if (language == "TR") {
+      data = [
+        {"word": "MUTLU", "emoji": "😊"},
+        {"word": "ÜZGÜN", "emoji": "😢"},
+        {"word": "KIZGIN", "emoji": "😡"},
+        {"word": "ŞAŞKIN", "emoji": "😲"},
+        {"word": "AŞIK", "emoji": "😍"},
+      ];
+    } else {
+      // İngilizce kelimeler
+      data = [
+        {"word": "HAPPY", "emoji": "😊"},
+        {"word": "SAD", "emoji": "😢"},
+        {"word": "ANGRY", "emoji": "😡"},
+        {"word": "SHOCKED", "emoji": "😲"},
+        {"word": "LOVE", "emoji": "😍"},
+      ];
+    }
+
+    var target = data[Random().nextInt(data.length)];
+    emojiText = target["word"]!;
+    correctEmoji = target["emoji"]!;
+
+    emojiOptions = [correctEmoji];
+    while (emojiOptions.length < 3) {
+      String wrong = data[Random().nextInt(data.length)]["emoji"]!;
+      if (!emojiOptions.contains(wrong)) emojiOptions.add(wrong);
+    }
+    emojiOptions.shuffle();
+  }
+
+  void checkSwipe(Direction input) {
+    if (!isPlaying) return;
+    if (currentTask == TaskType.wait) {
+      gameOver(t("game_over_touch"));
+      return;
+    }
+    if (currentTask == TaskType.direction) {
+      bool success = false;
+      if (isReverseRound) {
+        if (currentDirection == Direction.up && input == Direction.down) {
+          success = true;
+        }
+        if (currentDirection == Direction.down && input == Direction.up) {
+          success = true;
+        }
+        if (currentDirection == Direction.left && input == Direction.right) {
+          success = true;
+        }
+        if (currentDirection == Direction.right && input == Direction.left) {
+          success = true;
+        }
+      } else {
+        if (currentDirection == input) success = true;
+      }
+      handleResult(success);
+    }
+  }
+
+  void checkColor(Color selectedColor) {
+    if (!isPlaying) return;
+    if (currentTask == TaskType.wait) {
+      gameOver(t("game_over_touch"));
+      return;
+    }
+
+    if (currentTask == TaskType.notColor) {
+      bool isForbidden = false;
+      if (colorText == "KIRMIZI" || colorText == "RED")
+        if (selectedColor == Colors.red) {
+          isForbidden = true;
+        }
+      if (colorText == "MAVİ" || colorText == "BLUE")
+        if (selectedColor == Colors.blue) {
+          isForbidden = true;
+        }
+      if (colorText == "YEŞİL" || colorText == "GREEN")
+        if (selectedColor == Colors.green) {
+          isForbidden = true;
+        }
+      if (colorText == "SARI" || colorText == "YELLOW")
+        if (selectedColor == Colors.orange) {
+          isForbidden = true;
+        }
+      if (colorText == "MOR" || colorText == "PURPLE")
+        if (selectedColor == Colors.purple) {
+          isForbidden = true;
+        }
+
+      handleResult(!isForbidden);
+    } else {
+      handleResult(selectedColor == correctColor);
+    }
+  }
+
+  void checkMath(bool playerSaidTrue) {
+    if (!isPlaying) return;
+    if (currentTask == TaskType.wait) {
+      gameOver(t("game_over_touch"));
+      return;
+    }
+    bool success = (playerSaidTrue == isMathCorrect);
+    handleResult(success);
+  }
+
+  void checkEmoji(String selectedEmoji) {
+    if (!isPlaying) return;
+    if (currentTask == TaskType.wait) {
+      gameOver(t("game_over_touch"));
+      return;
+    }
+    handleResult(selectedEmoji == correctEmoji);
+  }
+
+  void checkScreenTap() {
+    if (isPlaying && currentTask == TaskType.wait) {
+      gameOver(t("game_over_hand"));
+    }
+  }
+
+  void handleResult(bool success) {
+    if (success) {
+      if (soundVolume > 0) HapticFeedback.lightImpact();
+      playSound("pop_correct.mp3");
+
+      int reactionTimeMs = DateTime.now()
+          .difference(_taskStartTime)
+          .inMilliseconds;
+      
+      if (reactionTimeMs < 1500) {
+        speedComboCount++;
+      } else {
+        speedComboCount = 0;
+      }
+
+      setState(() {
+        int point = isFeverMode ? 2 : 1;
+        if (activeDoubleCandy) point *= 2;
+
+        score += (isFeverMode ? 2 : 1);
+        earnedCandyThisRound += point;
+      });
+
+      if (score >= nextMotivationTarget) {
+        triggerMotivation();
+      }
+
+      nextTask();
+    } else {
+      speedComboCount = 0;
+
+      if (activeSecondChance) {
+        if (soundVolume > 0) HapticFeedback.mediumImpact();
+        playSound("shield_break.mp3");
+
+        setState(() {
+          activeSecondChance = false;
+        });
+        showToast(t("shield_broken"), Colors.cyan);
+        nextTask();
+      } else {
+        playSound("wrong_buzz.mp3");
+        gameOver(t("game_over_wrong"));
+      }
+    }
+  }
+
+  void showToast(String msg, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          msg,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+        backgroundColor: color,
+        duration: const Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.only(
+          bottom: MediaQuery.of(context).size.height - 150,
+          left: 20,
+          right: 20,
+        ),
+      ),
+    );
+  }
+
+  int calculateBrainAge() {
+    if (score < 10) return 80;
+    if (score < 25) return 60;
+    if (score < 40) return 40;
+    if (score < 60) return 30;
+    return 20;
+  }
+
+  void gameOver(String reason) {
+    if (soundVolume > 0) HapticFeedback.heavyImpact();
+    playSound("game_over.mp3");
+
+    isPlaying = false;
+    manageBackgroundMusic();
+
+    _gameTimer?.cancel();
+    _waitTaskTimer?.cancel();
+    resetGift();
+
+    deathCount++;
+    if (deathCount % 3 == 0) {
+       showInterstitialAd();
+    }
+    // Test için her defasında göster:
+
+    int brainAge = calculateBrainAge();
+
+    setState(() {
+      int finalCandyChange = earnedCandyThisRound - losePenalty;
+      totalCandy += finalCandyChange;
+      if (totalCandy < 0) totalCandy = 0;
+    });
+    saveGameData();
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Center(
+        child: Material(
+          color: Colors.transparent,
+          child: ScaleTransition(
+            scale: CurvedAnimation(
+              parent: ModalRoute.of(context)!.animation!,
+              curve: Curves.elasticOut,
+            ),
+            child: JellyBox(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+              color: Colors.white,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    reason,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 10,
+                      horizontal: 20,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.purple[50],
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: Column(
+                      children: [
+                        Text(
+                          t("brain_age"),
+                          style: const TextStyle(
+                            color: Colors.purple,
+                            fontSize: 16,
+                          ),
+                        ),
+                        Text(
+                          "$brainAge",
+                          style: const TextStyle(
+                            color: Colors.purple,
+                            fontSize: 40,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    "${t("score")}: $score",
+                    style: const TextStyle(
+                      color: Colors.black87,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[100],
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        Column(
+                          children: [
+                            Text(
+                              t("collected"), // ÇEVİRİ DÜZELTİLDİ
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            Text(
+                              "+$earnedCandyThisRound 🍬",
+                              style: const TextStyle(
+                                color: Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Column(
+                          children: [
+                            Text(t("penalty"), style: const TextStyle(fontSize: 12)), // ÇEVİRİ DÜZELTİLDİ
+                            Text(
+                              "-$losePenalty 🍬",
+                              style: const TextStyle(
+                                color: Colors.red,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  
+                  // DEVAM ET (REKLAM) BUTONU
+                  GestureDetector(
+                    onTap: () {
+                      playSound("ui_click.mp3");
+                      showRewardedAdForRevive();
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 15),
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.yellow[700],
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black12, offset: Offset(0,4), blurRadius: 4),
+                        ],
+                        border: Border.all(color: Colors.orange, width: 2),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.play_circle_fill, color: Colors.white, size: 24),
+                          const SizedBox(width: 8),
+                          Column(
+                            children: [
+                              Text(
+                                t("revive"),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              Text(
+                                t("watch_ad"),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      GestureDetector(
+                        onTap: () {
+                          playSound("ui_click.mp3");
+                          Navigator.pop(context);
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(15),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[200],
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.home, color: Colors.grey),
+                        ),
+                      ),
+                      const SizedBox(width: 20),
+                      JellyButton(
+                        text: t("retry"), // ÇEVİRİ DÜZELTİLDİ
+                        onTap: () {
+                          Navigator.pop(context);
+                          startGame(isRevive: false);
+                        },
+                        color: primaryPink,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void openSettings() {
+    playSound("ui_popup.mp3");
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Center(
+              child: Material(
+                color: Colors.transparent,
+                child: JellyBox(
+                  padding: const EdgeInsets.all(20),
+                  color: Colors.white,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        t("settings"),
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "${t("sound")}: ${(soundVolume * 100).toInt()}%",
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                            Slider(
+                              value: soundVolume,
+                              min: 0.0,
+                              max: 1.0,
+                              activeColor: primaryPink,
+                              onChanged: (val) {
+                                setDialogState(() => soundVolume = val);
+                                setState(() => soundVolume = val);
+                              },
+                              onChangeEnd: (val) {
+                                playSound("ui_click.mp3");
+                                saveGameData(); // KAYDET
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "${t("music")}: ${(musicVolume * 100).toInt()}%",
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                            Slider(
+                              value: musicVolume,
+                              min: 0.0,
+                              max: 1.0,
+                              activeColor: primaryPink,
+                              onChanged: (val) {
+                                setDialogState(() => musicVolume = val);
+                                setState(() {
+                                  musicVolume = val;
+                                  manageBackgroundMusic();
+                                });
+                              },
+                              onChangeEnd: (val) => saveGameData(), // KAYDET
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            t("lang"),
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Row(
+                            children: [
+                              _buildLangButton("TR", setDialogState),
+                              const SizedBox(width: 5),
+                              _buildLangButton("EN", setDialogState),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      JellyButton(
+                        text: t("close"),
+                        onTap: () {
+                          playSound("ui_click.mp3");
+                          Navigator.pop(context);
+                        },
+                        color: Colors.grey,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 10,
+                        ),
+                        fontSize: 16,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildLangButton(String code, StateSetter setDialogState) {
+    bool isSelected = language == code;
+    return GestureDetector(
+      onTap: () {
+        playSound("ui_click.mp3");
+        setDialogState(() {
+          language = code;
+        });
+        setState(() {
+          language = code;
+        });
+        saveGameData(); // DİLİ DE KAYDET
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isSelected ? primaryPink : Colors.grey[200],
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          code,
+          style: TextStyle(
+            color: isSelected ? Colors.white : Colors.black,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void openShop() {
+    playSound("ui_popup.mp3");
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.75,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+            ),
+            child: Column(
+              children: [
+                const SizedBox(height: 20),
+                Text(
+                  t("shop"),
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w900,
+                    color: primaryPink,
+                  ),
+                ),
+                Text(
+                  "${t("balance")} $totalCandy 🍬",
+                  style: const TextStyle(fontSize: 18, color: Colors.grey),
+                ),
+                const Divider(),
+                Expanded(
+                  child: GridView.count(
+                    crossAxisCount: 2,
+                    padding: const EdgeInsets.all(20),
+                    crossAxisSpacing: 15,
+                    mainAxisSpacing: 15,
+                    childAspectRatio: 0.8,
+                    children: [
+                      _buildShopItem(
+                        t("item_heart"),
+                        t("desc_heart"),
+                        "heart",
+                        500,
+                        Icons.favorite,
+                        Colors.red,
+                        () { setModalState(() {}); saveGameData(); },
+                      ),
+                      _buildShopItem(
+                        t("item_time"),
+                        t("desc_time"),
+                        "time_potion",
+                        800,
+                        Icons.hourglass_bottom,
+                        Colors.purple,
+                        () { setModalState(() {}); saveGameData(); },
+                      ),
+                      _buildShopItem(
+                        t("item_sugar"),
+                        t("desc_sugar"),
+                        "sugar_potion",
+                        1000,
+                        Icons.casino,
+                        Colors.orange,
+                        () { setModalState(() {}); saveGameData(); },
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: JellyButton(
+                    text: t("close"),
+                    onTap: () {
+                      playSound("ui_click.mp3");
+                      Navigator.pop(context);
+                    },
+                    color: Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildShopItem(String name, String desc, String id, int price, IconData icon, Color iconColor, VoidCallback onTap) {
+    int ownedQty = inventory[id] ?? 0;
+    bool canBuy = totalCandy >= price;
+
+    return GestureDetector(
+      onTap: () {
+        if (canBuy) {
+          playSound("buy_cha_ching.mp3"); 
+          totalCandy -= price;
+          inventory[id] = (inventory[id] ?? 0) + 1;
+          onTap();
+          setState(() {}); 
+        } else {
+          playSound("wrong_buzz.mp3");
+        }
+      },
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.grey[50],
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: canBuy ? primaryPink : Colors.grey[300]!,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 40,
+              color: ownedQty > 0
+                  ? Colors.green
+                  : (canBuy ? iconColor : Colors.grey),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              name,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            Text(
+              desc,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: canBuy ? primaryPink : Colors.grey,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                "${t("buy")}: $price 🍬",
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              // BURAYI DÜZELTTİK:
+              "${t("bag")}: $ownedQty",
+              style: const TextStyle(color: Colors.black54, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  double getRotationAngle() {
+    switch (currentDirection) {
+      case Direction.right:
+        return 0;
+      case Direction.down:
+        return pi / 2;
+      case Direction.left:
+        return pi;
+      case Direction.up:
+        return -pi / 2;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: GestureDetector(
+        onTap: checkScreenTap,
+        onVerticalDragEnd: (details) {
+          if (details.primaryVelocity! < 0) {
+            checkSwipe(Direction.up);
+          } else if (details.primaryVelocity! > 0)
+            checkSwipe(Direction.down);
+        },
+        onHorizontalDragEnd: (details) {
+          if (details.primaryVelocity! < 0) {
+            checkSwipe(Direction.left);
+          } else if (details.primaryVelocity! > 0)
+            checkSwipe(Direction.right);
+        },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomRight,
+                  colors: [bgNormal1, bgNormal2],
+                ),
+              ),
+              child: CustomPaint(
+                painter: FloatingCandyPainter(_bgController.value),
+              ),
+            ),
+
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeInOutCubic,
+              top: isFeverMode ? 0 : -(MediaQuery.of(context).size.height + 20),
+              left: 0,
+              right: 0,
+              height: MediaQuery.of(context).size.height + 20,
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomRight,
+                    colors: [bgFever1, bgFever2, Colors.purple],
+                  ),
+                ),
+                child: CustomPaint(
+                  painter: FloatingCandyPainter(_bgController.value),
+                ),
+              ),
+            ),
+
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 15,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.5),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white, width: 2),
+                          ),
+                          child: Row(
+                            children: [
+                              const Text("🍬 ", style: TextStyle(fontSize: 18)),
+                              Text(
+                                "$totalCandy",
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w900,
+                                  color: Colors.purple,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (isPlaying)
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                "${t("score")}: $score",
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w900,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              if (isFeverMode)
+                                Text(
+                                  t("fever"),
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.yellow,
+                                    shadows: [
+                                      Shadow(blurRadius: 10, color: Colors.red),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          ),
+                      ],
+                    ),
+
+                    Expanded(
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            if (isPlaying) ...[
+                              if (activeSecondChance ||
+                                  activeTimeSlow ||
+                                  activeDoubleCandy)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      if (activeSecondChance)
+                                        const Icon(
+                                          Icons.favorite,
+                                          color: Colors.red,
+                                          size: 30,
+                                        ),
+                                      const SizedBox(width: 10),
+                                      if (activeTimeSlow)
+                                        const Icon(
+                                          Icons.hourglass_bottom,
+                                          color: Colors.purpleAccent,
+                                          size: 30,
+                                        ),
+                                      const SizedBox(width: 10),
+                                      if (activeDoubleCandy)
+                                        const Icon(
+                                          Icons.casino,
+                                          color: Colors.orangeAccent,
+                                          size: 30,
+                                        ),
+                                    ],
+                                  ),
+                                ),
+
+                              if (currentTask == TaskType.direction) ...[
+                                const Spacer(),
+                                JellyBox(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 40,
+                                    vertical: 20,
+                                  ),
+                                  color: isReverseRound
+                                      ? Colors.redAccent
+                                      : Colors.greenAccent,
+                                  child: ThreeDText(
+                                    text: isReverseRound
+                                        ? t("reverse")
+                                        : t("same"),
+                                    fontSize: 32,
+                                  ),
+                                ),
+                                const SizedBox(height: 30),
+                                Expanded(
+                                  flex: 3,
+                                  child: Transform.rotate(
+                                    angle: getRotationAngle(),
+                                    child: JellyBox(
+                                      isCircle: true,
+                                      padding: const EdgeInsets.all(30),
+                                      color: Colors.white.withValues(alpha: 0.5),
+                                      child: SizedBox(
+                                        width: 200,
+                                        height: 200,
+                                        child: Image.asset(
+                                          'assets/arrow.png',
+                                          fit: BoxFit.contain,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                ThreeDText(text: t("swipe"), fontSize: 28),
+                                const Spacer(),
+                              ] else if (currentTask == TaskType.wait) ...[
+                                const Spacer(),
+                                JellyBox(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 30,
+                                    vertical: 15,
+                                  ),
+                                  color: Colors.orange,
+                                  child: ThreeDText(
+                                    text: t("dont_touch"),
+                                    fontSize: 35,
+                                  ),
+                                ),
+                                const SizedBox(height: 40),
+                                Expanded(
+                                  flex: 3,
+                                  child: Center(
+                                    child: JellyBox(
+                                      isCircle: true,
+                                      padding: const EdgeInsets.all(40),
+                                      color: Colors.redAccent,
+                                      child: SizedBox(
+                                        width: 150,
+                                        height: 150,
+                                        child: Image.asset(
+                                          'assets/pause.png',
+                                          fit: BoxFit.contain,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                ThreeDText(text: t("wait"), fontSize: 28),
+                                const Spacer(),
+                              ] else if (currentTask == TaskType.math) ...[
+                                const Spacer(),
+                                ThreeDText(text: t("math_q"), fontSize: 28),
+                                const SizedBox(height: 30),
+                                JellyBox(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 40,
+                                    vertical: 40,
+                                  ),
+                                  color: Colors.white,
+                                  child: Text(
+                                    mathEquation,
+                                    style: const TextStyle(
+                                      fontSize: 40,
+                                      fontWeight: FontWeight.w900,
+                                      color: Colors.indigo,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 50),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    JellyButton(
+                                      text: t("wrong"),
+                                      onTap: () => checkMath(false),
+                                      color: Colors.red,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                        vertical: 20,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 20),
+                                    JellyButton(
+                                      text: t("correct"),
+                                      onTap: () => checkMath(true),
+                                      color: Colors.green,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 20,
+                                        vertical: 20,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const Spacer(),
+                              ] else if (currentTask == TaskType.emoji) ...[
+                                const Spacer(),
+                                ThreeDText(text: t("emoji_q"), fontSize: 28),
+                                const SizedBox(height: 30),
+                                JellyBox(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 40,
+                                    vertical: 30,
+                                  ),
+                                  color: Colors.white,
+                                  child: Text(
+                                    emojiText,
+                                    style: const TextStyle(
+                                      fontSize: 40,
+                                      fontWeight: FontWeight.w900,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: emojiOptions.map((e) {
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                      ),
+                                      child: GestureDetector(
+                                        onTap: () => checkEmoji(e),
+                                        child: JellyBox(
+                                          padding: const EdgeInsets.all(15),
+                                          color: Colors.white.withValues(alpha: 0.5),
+                                          child: Text(
+                                            e,
+                                            style: const TextStyle(
+                                              fontSize: 50,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                                const Spacer(),
+                              ] else ...[
+                                const Spacer(),
+                                ThreeDText(
+                                  text: colorInstruction,
+                                  fontSize: 28,
+                                  isUnderlined:
+                                      currentTask == TaskType.notColor,
+                                ),
+                                const SizedBox(height: 20),
+                                JellyBox(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 50,
+                                    vertical: 30,
+                                  ),
+                                  color: Colors.white,
+                                  child: Text(
+                                    colorText,
+                                    style: TextStyle(
+                                      fontSize: 48,
+                                      fontWeight: FontWeight.w900,
+                                      color: colorInk,
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                Wrap(
+                                  spacing: 20,
+                                  runSpacing: 20,
+                                  alignment: WrapAlignment.center,
+                                  children: colorOptions.map((color) {
+                                    return GestureDetector(
+                                      onTap: () => checkColor(color),
+                                      child: Container(
+                                        width: 80,
+                                        height: 80,
+                                        decoration: BoxDecoration(
+                                          color: color,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.white,
+                                            width: 4,
+                                          ),
+                                          boxShadow: const [
+                                            BoxShadow(
+                                              color: Colors.black26,
+                                              blurRadius: 10,
+                                              offset: Offset(0, 5),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                                const Spacer(),
+                              ],
+                            ] else ...[
+                              // --- ANA MENÜ ---
+                              const Column(
+                                children: [
+                                  Icon(
+                                    Icons.flash_on_rounded,
+                                    size: 60,
+                                    color: Colors.white,
+                                  ),
+                                  ThreeDText(
+                                    text: "BRAIN\nGLITCH",
+                                    fontSize: 50,
+                                    lineHeight: 0.9,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 50),
+                              JellyButton(
+                                text: t("start"),
+                                onTap: startGame,
+                                color: accentCyan,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 80,
+                                  vertical: 25,
+                                ),
+                                fontSize: 35,
+                              ),
+                              const SizedBox(height: 20),
+
+                              if (inventory["heart"]! > 0 ||
+                                  inventory["time_potion"]! > 0 ||
+                                  inventory["sugar_potion"]! > 0)
+                                Container(
+                                  margin: const EdgeInsets.only(bottom: 20),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.5),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    t("item_warning"), // DÜZELTİLDİ: Dile duyarlı oldu
+                                    style: TextStyle(
+                                      color: Colors.purple[900],
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  _buildMiniButton(
+                                    Icons.shopping_cart,
+                                    Colors.orange,
+                                    openShop,
+                                  ),
+                                  const SizedBox(width: 20),
+                                  _buildMiniButton(
+                                    Icons.settings,
+                                    Colors.purple,
+                                    openSettings,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 60),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // --- FOOTER ---
+                    if (isPlaying)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: LinearProgressIndicator(
+                            value: progress,
+                            minHeight: 20,
+                            backgroundColor: Colors.white30,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              isFeverMode
+                                  ? Colors.red
+                                  : (currentTask == TaskType.wait
+                                        ? Colors.orange
+                                        : Colors.white),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+            if (isGiftVisible)
+              Positioned(
+                top: giftTopPosition,
+                left: giftLeftPosition,
+                child: GestureDetector(
+                  onTap: collectGift,
+                  child: ShakeWidget(
+                    child: Image.asset(
+                      'assets/gift.png',
+                      width: 80,
+                      height: 80,
+                    ),
+                  ),
+                ),
+              ),
+
+            if (isBonusTextVisible)
+              Positioned(
+                top: giftTopPosition,
+                left: giftLeftPosition + 10,
+                child: Material(
+                  color: Colors.transparent,
+                  child: Text(
+                    giftBonusText,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w900,
+                      color: Colors.yellowAccent,
+                      shadows: [Shadow(color: Colors.black, blurRadius: 5)],
+                    ),
+                  ),
+                ),
+              ),
+
+            if (showMotivation)
+              Positioned(
+                top: 60,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: IgnorePointer(
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.0, end: 1.0),
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.elasticOut,
+                      builder: (context, val, child) {
+                        return Transform.scale(
+                          scale: val,
+                          child: Transform.rotate(
+                            angle: -0.05,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 40,
+                                vertical: 15,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: primaryPink,
+                                  width: 4,
+                                ),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.black12,
+                                    offset: Offset(0, 10),
+                                    blurRadius: 10,
+                                  ),
+                                ],
+                              ),
+                              child: Text(
+                                currentMotivationText,
+                                style: TextStyle(
+                                  fontSize: 28,
+                                  fontWeight: FontWeight.w900,
+                                  color: primaryPink,
+                                  letterSpacing: 2,
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: _isBannerReady
+          ? SizedBox(
+              height: _bannerAd!.size.height.toDouble(),
+              width: _bannerAd!.size.width.toDouble(),
+              child: AdWidget(ad: _bannerAd!),
+            )
+          : const SizedBox.shrink(),
+    );
+  }
+
+  Widget _buildMiniButton(IconData icon, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: () {
+        playSound("ui_click.mp3");
+        onTap();
+      },
+      child: Container(
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: color.withValues(alpha: 0.4),
+              offset: const Offset(0, 5),
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: Icon(icon, color: color, size: 30),
+      ),
+    );
+  }
+}
+
+class ThreeDText extends StatelessWidget {
+  final String text;
+  final double fontSize;
+  final bool isUnderlined;
+  final double lineHeight;
+
+  const ThreeDText({
+    super.key,
+    required this.text,
+    required this.fontSize,
+    this.isUnderlined = false,
+    this.lineHeight = 1.0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        Positioned(
+          top: 3,
+          left: 2,
+          child: Text(
+            text,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: fontSize,
+              fontFamily: 'Arial Rounded',
+              fontWeight: FontWeight.w900,
+              height: lineHeight,
+              letterSpacing: 1.5,
+              color: const Color(0xFF880E4F),
+              decoration: isUnderlined
+                  ? TextDecoration.underline
+                  : TextDecoration.none,
+              decorationColor: const Color(0xFF880E4F),
+              decorationThickness: 4.0,
+            ),
+          ),
+        ),
+        Text(
+          text,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: fontSize,
+            fontFamily: 'Arial Rounded',
+            fontWeight: FontWeight.w900,
+            height: lineHeight,
+            letterSpacing: 1.5,
+            color: Colors.white,
+            decoration: isUnderlined
+                ? TextDecoration.underline
+                : TextDecoration.none,
+            decorationColor: Colors.white,
+            decorationThickness: 4.0,
+            shadows: [
+              Shadow(
+                offset: const Offset(0, 2),
+                blurRadius: 2,
+                color: Colors.black.withValues(alpha: 0.2),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class ShakeWidget extends StatefulWidget {
+  final Widget child;
+  const ShakeWidget({super.key, required this.child});
+  @override
+  State<ShakeWidget> createState() => _ShakeWidgetState();
+}
+
+class _ShakeWidgetState extends State<ShakeWidget>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 100),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        double angle = 0.1 * sin(_controller.value * 2 * pi);
+        return Transform.rotate(angle: angle, child: widget.child);
+      },
+    );
+  }
+}
+
+class JellyButton extends StatefulWidget {
+  final String text;
+  final VoidCallback onTap;
+  final Color color;
+  final EdgeInsets padding;
+  final double fontSize;
+  const JellyButton({
+    super.key,
+    required this.text,
+    required this.onTap,
+    required this.color,
+    this.padding = const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+    this.fontSize = 20,
+  });
+  @override
+  State<JellyButton> createState() => _JellyButtonState();
+}
+
+class _JellyButtonState extends State<JellyButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scale;
+  @override
+  void initState() {
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 100),
+    );
+    _scale = Tween<double>(begin: 1.0, end: 0.9).animate(_controller);
+    super.initState();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _controller.forward(),
+      onTapUp: (_) {
+        _controller.reverse();
+        widget.onTap();
+      },
+      onTapCancel: () => _controller.reverse(),
+      child: ScaleTransition(
+        scale: _scale,
+        child: Container(
+          padding: widget.padding,
+          decoration: BoxDecoration(
+            color: widget.color,
+            borderRadius: BorderRadius.circular(30),
+            boxShadow: [
+              const BoxShadow(
+                color: Colors.black12,
+                offset: Offset(0, 10),
+                blurRadius: 10,
+              ),
+              BoxShadow(
+                color: Colors.white.withValues(alpha: 0.4),
+                offset: const Offset(0, -5),
+                blurRadius: 0,
+                spreadRadius: -2,
+              ),
+            ],
+            border: Border.all(color: Colors.white.withValues(alpha: 0.5), width: 3),
+          ),
+          child: Text(
+            widget.text,
+            style: TextStyle(
+              fontSize: widget.fontSize,
+              fontWeight: FontWeight.w900,
+              color: Colors.white,
+              letterSpacing: 1.5,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class JellyBox extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+  final Color color;
+  final bool isCircle;
+  const JellyBox({
+    super.key,
+    required this.child,
+    required this.padding,
+    required this.color,
+    this.isCircle = false,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: color,
+        shape: isCircle ? BoxShape.circle : BoxShape.rectangle,
+        borderRadius: isCircle ? null : BorderRadius.circular(25),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            offset: const Offset(0, 8),
+            blurRadius: 15,
+          ),
+          BoxShadow(
+            color: Colors.white.withValues(alpha: 0.5),
+            offset: const Offset(-4, -4),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+}
+
+class FloatingCandyPainter extends CustomPainter {
+  final double animationValue;
+  final List<Offset> positions = [
+    const Offset(0.1, 0.2),
+    const Offset(0.8, 0.1),
+    const Offset(0.5, 0.5),
+    const Offset(0.2, 0.8),
+    const Offset(0.9, 0.7),
+    const Offset(0.4, 0.9),
+  ];
+  FloatingCandyPainter(this.animationValue);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+    for (int i = 0; i < positions.length; i++) {
+      double dy = (positions[i].dy - animationValue * (0.5 + i * 0.1)) % 1.0;
+      if (dy < 0) dy += 1.0;
+      final position = Offset(positions[i].dx * size.width, dy * size.height);
+      paint.color = i % 2 == 0
+          ? Colors.white.withValues(alpha: 0.5)
+          : Colors.purple.withValues(alpha: 0.5);
+      if (i % 2 == 0) {
+        canvas.drawCircle(position, 20 + i * 5, paint);
+      } else {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromCenter(center: position, width: 40, height: 40),
+            const Radius.circular(10),
+          ),
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
