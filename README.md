@@ -92,14 +92,14 @@ Projeyi yerel makinenizde çalıştırmak için:
     ```
 
 ---
-## 📸 Ekran Görüntüleri
+## 📸 GÖRSELLER
 
 <div style="display: flex; flex-direction: row;">
   <img src="Images/BrainGlitch1.png" width="200" />
   <img src="Images/BrainGlitch2.png" width="200" style="margin-left: 10px;" />
   <img src="Images/BrainGlitch3.png" width="200" style="margin-left: 30px;" />
-  <img src="Images/BrainGlitch4.png" width="200" style="margin-left: 50px;" />
-  <img src="Images/BrainGlitch5.png" width="200" style="margin-left: 70px;" />
+  <img src="Images/BrainGlitch4.png" width="200" style="margin-left: 70px;" />
+  <img src="Images/BrainGlitch5.png" width="200" style="margin-left: 90px;" />
   
 </div>
 
