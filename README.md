@@ -76,7 +76,7 @@ Projeyi yerel makinenizde çalıştırmak için:
 
 1.  Depoyu klonlayın:
     ```bash
-    git clone [https://github.com/KULLANICI_ADIN/REPO_ADIN.git](https://github.com/KULLANICI_ADIN/REPO_ADIN.git)
+    git clone [https://github.com/UmutCgn/brain-glitch.git](https://github.com/UmutCgn/brain-glitch.git)
     ```
 2.  Proje dizinine girin:
     ```bash
